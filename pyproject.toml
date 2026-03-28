@@ -1,0 +1,63 @@
+[build-system]
+requires = ["hatchling<1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "unforget"
+version = "0.2.1"
+description = "Fast, zero-LLM memory for AI agents. One database. Nothing to forget."
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.11"
+authors = [{ name = "Unforget", email = "team@unforget.sh" }]
+keywords = ["ai", "agents", "memory", "llm", "pgvector", "postgresql"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "asyncpg>=0.29",
+    "sentence-transformers>=3.0",
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+openai = ["openai>=1.30"]
+anthropic = ["anthropic>=0.27"]
+spacy = ["spacy>=3.7"]
+api = ["fastapi>=0.111", "uvicorn[standard]>=0.30"]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+    "mypy>=1.10",
+]
+
+[project.urls]
+Homepage = "https://github.com/unforget-ai/unforget"
+Documentation = "https://docs.unforget.sh"
+Repository = "https://github.com/unforget-ai/unforget"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/unforget"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = [
+    "E501",  # line length — too noisy for SQL strings and long signatures
+    "N818",  # exception suffix — RateLimitExceeded/MemoryQuotaExceeded are public API names
+    "E402",  # import order — scheduler.py needs TYPE_CHECKING after runtime imports to avoid circular
+]
