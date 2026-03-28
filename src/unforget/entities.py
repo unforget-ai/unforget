@@ -67,11 +67,40 @@ _DOMAIN_RE = re.compile(r"\b[\w-]+(?:\.[\w-]+)*\.(?:io|com|org|net|dev|app|ai|co
 _VERSION_RE = re.compile(r"\b(?:v?\d+\.\d+(?:\.\d+)?)\b")
 _CAPITALIZED_RE = re.compile(r"\b[A-Z][a-zA-Z0-9]*(?:[.-][a-zA-Z0-9]+)*\b")
 
+# Person name pattern: sequences of 2-3 capitalized words (e.g., "Caroline Smith", "John")
+# Excludes common non-name words that appear capitalized mid-sentence
+_NAME_EXCLUDE: set[str] = {
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+    "january", "february", "march", "april", "may", "june", "july", "august",
+    "september", "october", "november", "december",
+    "yes", "no", "ok", "hey", "hi", "hello", "thanks", "sure", "well",
+    "oh", "wow", "great", "good", "nice", "cool", "right", "true", "false",
+}
+
+# Date patterns for temporal extraction
+_DATE_MONTH_YEAR_RE = re.compile(
+    r"\b(\d{1,2})\s+"
+    r"(January|February|March|April|May|June|July|August|September|October|November|December)"
+    r"(?:[,\s]+(\d{4}))?\b",
+    re.IGNORECASE,
+)
+_MONTH_YEAR_RE = re.compile(
+    r"\b(January|February|March|April|May|June|July|August|September|October|November|December)"
+    r"(?:[,\s]+(\d{4}))\b",
+    re.IGNORECASE,
+)
+_RELATIVE_DATE_RE = re.compile(
+    r"\b(yesterday|last\s+(?:week|month|year)|next\s+(?:week|month|year)|"
+    r"last\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b",
+    re.IGNORECASE,
+)
+
 
 def extract_entities(text: str) -> list[str]:
     """Extract named entities from text using heuristics.
 
     Returns lowercase, deduplicated entity list.
+    Extracts: tech terms, domains, versions, person names, and date references.
     """
     entities: set[str] = set()
 
@@ -87,7 +116,6 @@ def extract_entities(text: str) -> list[str]:
 
     # 3. Version strings (Python 3.12, v2.1.0)
     for match in _VERSION_RE.finditer(text):
-        # Try to capture preceding word (e.g., "Python 3.12")
         start = match.start()
         prefix = text[:start].rstrip()
         prefix_word = prefix.split()[-1] if prefix else ""
@@ -96,19 +124,81 @@ def extract_entities(text: str) -> list[str]:
         else:
             entities.add(match.group())
 
-    # 4. Capitalized words (proper nouns) — skip sentence-initial and stopwords
-    sentences = re.split(r"[.!?]\s+", text)
-    for sentence in sentences:
-        words_in_sentence = sentence.split()
-        for i, word in enumerate(words_in_sentence):
-            # Skip first word of sentence (always capitalized)
-            if i == 0:
+    # 4. Person names — capitalized words, including after speaker labels ("Caroline:")
+    #    and at sentence boundaries. Captures multi-word names like "John Smith".
+    #    Split on sentence boundaries AND speaker labels (e.g., "Caroline: Hey...")
+    segments = re.split(r"[.!?]\s+|\n", text)
+    for segment in segments:
+        words_in_segment = segment.split()
+        i = 0
+        while i < len(words_in_segment):
+            word = words_in_segment[i]
+
+            # Skip words that are speaker labels ending with ":"
+            if word.endswith(":") and len(word) > 2:
+                # Extract the speaker name itself (before the colon)
+                speaker = word[:-1]
+                if speaker[0].isupper() and speaker.lower() not in _STOPWORDS:
+                    entities.add(speaker.lower())
+                i += 1
                 continue
-            for cap_match in _CAPITALIZED_RE.finditer(word):
+
+            # After timestamp brackets like [8:02 PM] skip non-name content
+            if word.startswith("[") or word.endswith("]"):
+                i += 1
+                continue
+
+            cap_match = _CAPITALIZED_RE.match(word)
+            if cap_match:
                 candidate = cap_match.group()
                 lower = candidate.lower()
-                if lower not in _STOPWORDS and len(lower) > 1:
-                    entities.add(lower)
+
+                if lower not in _STOPWORDS and lower not in _NAME_EXCLUDE and len(lower) > 1:
+                    # Try to capture multi-word names (e.g., "John Smith")
+                    name_parts = [candidate]
+                    j = i + 1
+                    while j < len(words_in_segment):
+                        next_word = words_in_segment[j]
+                        # Stop at punctuation, speaker labels, or non-capitalized words
+                        if next_word.endswith(":") or next_word.startswith("["):
+                            break
+                        next_match = _CAPITALIZED_RE.match(next_word)
+                        if (
+                            next_match
+                            and next_match.group().lower() not in _STOPWORDS
+                            and next_match.group().lower() not in _NAME_EXCLUDE
+                        ):
+                            name_parts.append(next_match.group())
+                            j += 1
+                            if len(name_parts) >= 3:
+                                break
+                        else:
+                            break
+
+                    # Add full name and individual parts
+                    if len(name_parts) >= 2:
+                        entities.add(" ".join(name_parts).lower())
+                    for part in name_parts:
+                        part_lower = part.lower()
+                        if part_lower not in _NAME_EXCLUDE and len(part_lower) > 1:
+                            entities.add(part_lower)
+                    i = j
+                    continue
+            i += 1
+
+    # 5. Date references — extract month/year mentions for temporal matching
+    for match in _DATE_MONTH_YEAR_RE.finditer(text):
+        month = match.group(2).lower()
+        year = match.group(3)
+        entities.add(month)
+        if year:
+            entities.add(f"{month} {year}")
+
+    for match in _MONTH_YEAR_RE.finditer(text):
+        month = match.group(1).lower()
+        year = match.group(2)
+        entities.add(month)
+        entities.add(f"{month} {year}")
 
     # Remove any empty strings
     entities.discard("")

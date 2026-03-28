@@ -293,7 +293,7 @@ class MemoryStore:
                         memory_type.value,
                         item.tags,
                         _vec_str(embedding),
-                        [],
+                        extract_entities(item.content),
                         item.importance,
                         item.shared,
                         item.immutable,
@@ -404,8 +404,9 @@ class MemoryStore:
         _t3 = _time.perf_counter()
 
         # 4-channel retrieval
-        # Reranker: fetch limit + tiny buffer. Each extra pair costs ~3-5ms in reranking.
-        fetch_limit = min(limit + 2, 20) if (rerank and self._reranker) else limit
+        # Reranker: fetch wider candidate pool so the right memory isn't missed.
+        # Each extra pair costs ~0.3ms in reranking — wider pool is worth the tradeoff.
+        fetch_limit = min(limit * 3, 40) if (rerank and self._reranker) else limit
 
         async with self.pool.acquire() as conn:
             results = await four_channel_recall(
@@ -428,6 +429,10 @@ class MemoryStore:
         else:
             results = results[:limit]
         _t5 = _time.perf_counter()
+
+        # Deduplicate overlapping content (hybrid mode creates per-turn + chunk memories
+        # with heavily overlapping text — returning both wastes context budget)
+        results = _deduplicate_results(results, limit)
 
         # Filter by threshold
         if threshold > 0:
@@ -999,6 +1004,45 @@ class MemoryQuotaExceeded(Exception):
 def _vec_str(vec: list[float]) -> str:
     """Format a vector as a pgvector-compatible string '[0.1,0.2,...]'."""
     return "[" + ",".join(f"{v:.6f}" for v in vec) + "]"
+
+
+def _deduplicate_results(results: list[MemoryResult], limit: int) -> list[MemoryResult]:
+    """Remove results whose content is largely contained in a higher-scored result.
+
+    Hybrid ingestion creates per-turn and chunk memories with overlapping text.
+    Returning both wastes the context budget and dilutes signal.
+    """
+    if len(results) <= 1:
+        return results
+
+    kept: list[MemoryResult] = []
+    for result in results:
+        content_lower = result.content.lower()
+        # Check if this result's core content is already covered by a kept result
+        is_dup = False
+        for existing in kept:
+            existing_lower = existing.content.lower()
+            # If the shorter one is mostly contained in the longer one, skip it
+            shorter, longer = (
+                (content_lower, existing_lower)
+                if len(content_lower) <= len(existing_lower)
+                else (existing_lower, content_lower)
+            )
+            # Use a simple substring check on meaningful chunks
+            # Split shorter into phrases and check what fraction appears in longer
+            phrases = [p.strip() for p in shorter.split("\n") if len(p.strip()) > 20]
+            if phrases:
+                overlap = sum(1 for p in phrases if p in longer)
+                if overlap / len(phrases) > 0.6:
+                    is_dup = True
+                    break
+
+        if not is_dup:
+            kept.append(result)
+        if len(kept) >= limit:
+            break
+
+    return kept
 
 
 def _row_to_item(row: asyncpg.Record) -> MemoryItem:

@@ -33,16 +33,16 @@ class RetrievalConfig:
     rrf_k: int = 60
     channel_weights: dict[str, float] = field(default_factory=lambda: {
         "semantic": 1.0,
-        "bm25": 0.8,
-        "entity": 0.6,
-        "temporal": 0.4,
+        "bm25": 1.0,
+        "entity": 0.7,
+        "temporal": 0.3,
     })
     type_boosts: dict[str, float] = field(default_factory=lambda: {
         "insight": 1.5,
         "event": 1.0,
         "raw": 0.5,
     })
-    per_channel_limit: int = 8
+    per_channel_limit: int = 15
     ef_search: int = 40
 
 
