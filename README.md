@@ -1,23 +1,43 @@
-# Unforget
+<p align="center">
+  <a href="https://unforget.sh">
+    <img src="https://docs.unforget.sh/logo.png" width="180" alt="Unforget">
+  </a>
+</p>
 
-Memory for AI agents that actually works. PostgreSQL + pgvector. No vendor lock-in. No cloud dependency. Just fast, reliable memory your agents can read and write in milliseconds.
+<h1 align="center">Unforget</h1>
+
+<p align="center">
+  <strong>Zero-LLM memory for AI agents. One database. Nothing to forget.</strong>
+</p>
+
+<p align="center">
+  <a href="https://pypi.org/project/unforget"><img src="https://img.shields.io/pypi/v/unforget?color=%2334D058&label=pypi" alt="PyPI"></a>
+  <a href="https://pypi.org/project/unforget"><img src="https://img.shields.io/pypi/pyversions/unforget" alt="Python"></a>
+  <a href="https://github.com/unforget-ai/unforget/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License"></a>
+  <a href="https://docs.unforget.sh"><img src="https://img.shields.io/badge/docs-unforget.sh-blue" alt="Docs"></a>
+</p>
+
+<p align="center">
+  <a href="https://docs.unforget.sh">Documentation</a> · <a href="#quick-start">Quick Start</a> · <a href="#llm-integrations">Integrations</a> · <a href="#how-retrieval-works">How It Works</a>
+</p>
+
+---
+
+Most agent memory solutions require an LLM call on every write, adding 500ms+ latency and API costs. Unforget stores memories in **~7ms** with zero LLM calls, retrieves them with **4-channel hybrid search**, and runs on a single PostgreSQL database you already know how to operate.
 
 ```bash
 pip install unforget
 ```
 
----
+### Why Unforget?
 
-## Why unforget?
-
-Most agent memory solutions are either too slow (LLM on every write), too complex (graph databases, vector-only), or too locked-in (cloud APIs, proprietary formats).
-
-Unforget is different:
-- **Zero LLM on write** — memories are stored in ~7ms, not seconds
-- **4-channel hybrid retrieval** — semantic + full-text + entity + temporal, fused with RRF
-- **One database** — PostgreSQL with pgvector. You already know how to run it
-- **ONNX Runtime** — 2-3x faster inference than PyTorch on CPU
-- **Background consolidation** — dedup, decay, and promotion happen while your agent sleeps
+| | Unforget | Others (Mem0, Zep, etc.) |
+|---|---|---|
+| **Write latency** | ~7ms | 500ms+ (LLM required) |
+| **Write cost** | $0 | LLM API cost per write |
+| **Retrieval** | 4-channel hybrid (semantic + BM25 + entity + temporal) | Vector-only or vector + graph |
+| **Infrastructure** | PostgreSQL only | PostgreSQL + Neo4j / Qdrant / etc. |
+| **LLM dependency** | None on write path | Required on every operation |
 
 ---
 
@@ -154,13 +174,105 @@ Every `recall()` fires four search channels in parallel inside a single SQL quer
 
 Results are boosted by type (insight > event > raw) and reranked with a cross-encoder for accuracy.
 
-One SQL round trip. Four search strategies. No external services.
+**One SQL round trip. Four search strategies. No external services.**
 
 ---
 
-## Pluggable Embedders
+## More Examples
 
-Swap the embedding model without changing your code. The default uses a local ONNX model (fast, free). Need better quality? Plug in OpenAI, Cohere, or your own.
+<details>
+<summary><strong>Personal assistant that remembers preferences</strong></summary>
+
+```python
+memory = store.bind(org_id="user-123", agent_id="scheduler")
+
+# First conversation
+await memory.write("Likes morning meetings, never after 3pm")
+await memory.write("Allergic to shellfish")
+await memory.write("Prefers window seats on flights")
+
+# Weeks later...
+context = await memory.auto_recall("book a dinner reservation")
+# → recalls the shellfish allergy automatically
+```
+</details>
+
+<details>
+<summary><strong>Customer support bot with history</strong></summary>
+
+```python
+support = store.bind(org_id="acme", agent_id="support")
+
+# Ingest a full conversation transcript
+await support.ingest([
+    {"role": "user", "content": "My printer isn't connecting to wifi"},
+    {"role": "assistant", "content": "Let's try resetting the network settings..."},
+    {"role": "user", "content": "That worked! Thanks."},
+], mode="background")
+
+# Next time the user calls about printers:
+results = await support.recall("printer wifi issue")
+# → recalls the previous fix
+```
+</details>
+
+<details>
+<summary><strong>Fact versioning — when things change</strong></summary>
+
+```python
+memory = store.bind(org_id="u-1", agent_id="bot")
+
+# User moves to a new city
+m = await memory.write("User lives in Austin, TX")
+
+# Six months later, they move
+old, new = await memory.supersede(m.id, "User lives in Denver, CO")
+# Old memory soft-deleted, new one linked. Full audit trail.
+
+# "Where did they live in January?"
+memories = await memory.timeline(at=january_15)
+# → [MemoryItem(content="User lives in Austin, TX")]
+```
+</details>
+
+<details>
+<summary><strong>Background consolidation</strong></summary>
+
+```python
+from unforget import ConsolidationScheduler
+
+# Run consolidation every hour
+scheduler = ConsolidationScheduler(store, interval_seconds=3600)
+store.attach_scheduler(scheduler)
+await scheduler.start()
+
+# Or trigger manually
+memory = store.bind(org_id="acme", agent_id="bot")
+report = await memory.consolidate()
+# → ConsolidationReport(duplicates_merged=3, memories_decayed=12, memories_expired=5)
+```
+
+Consolidation handles:
+- **Dedup** — merges near-identical memories (cosine > 0.92)
+- **Decay** — reduces importance of memories not accessed in 7/30 days
+- **Expire** — soft-deletes raw chunks past their 30-day TTL
+- **Promote** — distills raw conversation chunks into insights (with optional LLM)
+</details>
+
+<details>
+<summary><strong>REST API — 17 endpoints out of the box</strong></summary>
+
+```python
+from unforget.api import create_memory_router
+
+app.include_router(create_memory_router(store), prefix="/v1/memory")
+# write, recall, auto-recall, ingest, list, get, update, delete,
+# bulk-delete, supersede, timeline, chain, history, stats, consolidate
+```
+</details>
+
+<details>
+<summary><strong>Pluggable embedders</strong></summary>
 
 ```python
 from unforget import MemoryStore, OpenAIEmbedder
@@ -168,11 +280,8 @@ from unforget import MemoryStore, OpenAIEmbedder
 # Default: local ONNX/PyTorch (free, ~3ms per embed)
 store = MemoryStore("postgresql://...")
 
-# OpenAI: higher quality, costs money, ~100ms per embed
+# OpenAI: higher quality, costs money
 store = MemoryStore("postgresql://...", embedder=OpenAIEmbedder())
-store = MemoryStore("postgresql://...", embedder=OpenAIEmbedder(
-    model="text-embedding-3-large",  # 3072 dims
-))
 
 # Custom: implement BaseEmbedder
 from unforget import BaseEmbedder
@@ -190,101 +299,11 @@ class CohereEmbedder(BaseEmbedder):
 
 store = MemoryStore("postgresql://...", embedder=CohereEmbedder())
 ```
-
-The database schema auto-adapts to the embedding dimensionality. Just switch the embedder and go.
-
----
-
-## More Examples
-
-### Personal assistant that remembers preferences
-
-```python
-memory = store.bind(org_id="user-123", agent_id="scheduler")
-
-# First conversation
-await memory.write("Likes morning meetings, never after 3pm")
-await memory.write("Allergic to shellfish")
-await memory.write("Prefers window seats on flights")
-
-# Weeks later...
-context = await memory.auto_recall("book a dinner reservation")
-# → recalls the shellfish allergy automatically
-```
-
-### Customer support bot with history
-
-```python
-support = store.bind(org_id="acme", agent_id="support")
-
-# Ingest a full conversation transcript
-await support.ingest([
-    {"role": "user", "content": "My printer isn't connecting to wifi"},
-    {"role": "assistant", "content": "Let's try resetting the network settings..."},
-    {"role": "user", "content": "That worked! Thanks."},
-], mode="background")
-
-# Next time the user calls about printers:
-results = await support.recall("printer wifi issue")
-# → recalls the previous fix
-```
-
-### Fact versioning — when things change
-
-```python
-memory = store.bind(org_id="u-1", agent_id="bot")
-
-# User moves to a new city
-m = await memory.write("User lives in Austin, TX")
-
-# Six months later, they move
-old, new = await memory.supersede(m.id, "User lives in Denver, CO")
-# Old memory soft-deleted, new one linked. Full audit trail.
-
-# "Where did they live in January?"
-memories = await memory.timeline(at=january_15)
-# → [MemoryItem(content="User lives in Austin, TX")]
-```
-
-### Background consolidation
-
-```python
-from unforget import ConsolidationScheduler
-
-# Run consolidation every hour
-scheduler = ConsolidationScheduler(store, interval_seconds=3600)
-store.attach_scheduler(scheduler)
-await scheduler.start()
-
-# Or trigger manually
-memory = store.bind(org_id="acme", agent_id="bot")
-report = await memory.consolidate()
-# → ConsolidationReport(duplicates_merged=3, memories_decayed=12, memories_expired=5)
-```
-
-Consolidation handles:
-- **Dedup** — merges near-identical memories (cosine > 0.92) using numpy matmul
-- **Decay** — reduces importance of memories not accessed in 7/30 days
-- **Expire** — soft-deletes raw chunks past their 30-day TTL
-- **Promote** — distills raw conversation chunks into insights (with optional LLM)
-
-### REST API
-
-Mount on any FastAPI app — 17 endpoints out of the box:
-
-```python
-from unforget.api import create_memory_router
-
-app.include_router(create_memory_router(store), prefix="/v1/memory")
-# write, recall, auto-recall, ingest, list, get, update, delete,
-# bulk-delete, supersede, timeline, chain, history, stats, consolidate
-```
+</details>
 
 ---
 
 ## Performance
-
-Unforget ships with ONNX Runtime support for the embedding model, cutting inference time in half. The embedding cache eliminates redundant computation for repeated content.
 
 | Operation | Latency | Notes |
 |-----------|---------|-------|
@@ -295,87 +314,27 @@ Unforget ships with ONNX Runtime support for the embedding model, cutting infere
 | Cache hit (recall) | <0.1ms | TTL cache for repeated queries |
 | Cache hit (embed) | <0.1ms | LRU cache by content hash |
 
-### Autoimprove (experimental)
-
-Unforget includes an autoresearch-style optimization loop inspired by [Karpathy's autoresearch](https://github.com/karpathy/autoresearch). A Python script runs in a loop on your machine, using Claude Code as the brain:
-
-```
-benchmark → analyze bottleneck → propose ONE optimization → test → benchmark → keep or revert
-```
-
-The loop has already produced 6 merged optimizations across 14 cycles:
-
-| Optimization | Impact |
-|---|---|
-| Consolidation: numpy matmul (replaces N HNSW queries) | 144ms → 16ms |
-| Embedding LRU cache (SHA-256 keyed, 4096 entries) | Cache hits: <0.1ms |
-| ONNX Runtime for embedder | Embed: 9ms → 3ms |
-| Store: CTE insert + audit trail (single round trip) | ~3ms saved per write |
-| Retrieval: conditional entity CTE | ~1ms saved |
-| Reranker: batch optimization | +6 benchmark points |
-
-Run it yourself:
-
-```bash
-# Single cycle
-python autoimprove/autoimprove.py --once
-
-# Continuous loop (every 4 hours)
-python autoimprove/autoimprove.py --interval 4
-
-# Quick mode for faster iteration
-python autoimprove/autoimprove.py --once --quick
-```
-
-The autoimprove agent follows strict rules: one change per cycle, max 2 files, all 265 tests must pass, benchmark score must improve by at least 1 point. Failed experiments are automatically reverted. See `autoimprove/program.md` for the full constraint set.
-
 ---
 
 ## Infrastructure
-
-- **Database**: PostgreSQL + pgvector — one `docker compose up`
-- **Embedding**: `all-MiniLM-L6-v2` — ONNX Runtime (default) or PyTorch fallback
-- **Reranking**: `ms-marco-MiniLM-L-6-v2` cross-encoder — local, CPU, ~10ms for 12 pairs
-- **No external APIs** required for core functionality
-- **Python**: 3.11+
 
 ```bash
 # Start PostgreSQL + pgvector
 docker compose up -d
 
 # Install
-pip install unforget[openai]     # or unforget[anthropic] or unforget[api]
+pip install unforget              # core only
+pip install unforget[openai]      # + OpenAI SDK wrapper
+pip install unforget[anthropic]   # + Anthropic SDK wrapper
+pip install unforget[api]         # + FastAPI router
+pip install unforget[spacy]       # + better entity extraction
 ```
 
-### ONNX Setup (optional, recommended)
-
-ONNX Runtime makes embedding 2-3x faster. Export the models once:
-
-```bash
-pip install optimum[onnxruntime]
-
-python -c "
-from optimum.onnxruntime import ORTModelForFeatureExtraction
-from transformers import AutoTokenizer
-m = ORTModelForFeatureExtraction.from_pretrained('sentence-transformers/all-MiniLM-L6-v2', export=True)
-m.save_pretrained('models/embedder-onnx')
-AutoTokenizer.from_pretrained('sentence-transformers/all-MiniLM-L6-v2').save_pretrained('models/embedder-onnx')
-"
-```
-
-Unforget auto-detects `models/embedder-onnx/model.onnx` and uses it. Falls back to PyTorch if not found.
-
----
-
-## Install
-
-```bash
-pip install unforget                # core only
-pip install unforget[openai]        # + OpenAI SDK wrapper
-pip install unforget[anthropic]     # + Anthropic SDK wrapper
-pip install unforget[api]           # + FastAPI router
-pip install unforget[spacy]         # + better entity extraction
-```
+- **Database**: PostgreSQL 16 + pgvector
+- **Embedding**: `all-MiniLM-L6-v2` via ONNX Runtime (default) or PyTorch
+- **Reranking**: `ms-marco-MiniLM-L-6-v2` cross-encoder
+- **Python**: 3.11+
+- **No external APIs** required for core functionality
 
 ---
 
