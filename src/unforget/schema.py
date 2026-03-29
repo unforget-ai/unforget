@@ -63,6 +63,18 @@ CREATE TABLE IF NOT EXISTS memory_history (
 );
 """
 
+CREATE_ASSOCIATIONS_TABLE = """
+CREATE TABLE IF NOT EXISTS memory_associations (
+    memory_a    UUID NOT NULL REFERENCES memory(id) ON DELETE CASCADE,
+    memory_b    UUID NOT NULL REFERENCES memory(id) ON DELETE CASCADE,
+    strength    FLOAT NOT NULL DEFAULT 1.0,
+    link_type   TEXT NOT NULL DEFAULT 'co_occurrence',
+    created_at  TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (memory_a, memory_b),
+    CHECK (memory_a < memory_b)
+);
+"""
+
 CREATE_INDEXES = [
     """CREATE INDEX IF NOT EXISTS memory_embedding_idx ON memory
        USING hnsw (embedding vector_cosine_ops)
@@ -79,6 +91,9 @@ CREATE_INDEXES = [
        (org_id, shared) WHERE shared = true;""",
     """CREATE INDEX IF NOT EXISTS memory_history_idx ON memory_history
        (memory_id, changed_at);""",
+    # Association indexes for fast lookup from either side
+    """CREATE INDEX IF NOT EXISTS memory_assoc_a_idx ON memory_associations (memory_a);""",
+    """CREATE INDEX IF NOT EXISTS memory_assoc_b_idx ON memory_associations (memory_b);""",
 ]
 
 
@@ -91,5 +106,6 @@ async def ensure_schema(pool: asyncpg.Pool, *, dims: int = 384) -> None:
         await conn.execute(CREATE_EXTENSION)
         await conn.execute(CREATE_MEMORY_TABLE.format(dims=dims))
         await conn.execute(CREATE_HISTORY_TABLE)
+        await conn.execute(CREATE_ASSOCIATIONS_TABLE)
         for idx in CREATE_INDEXES:
             await conn.execute(idx)

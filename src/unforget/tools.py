@@ -17,6 +17,8 @@ import logging
 import uuid
 from typing import Any
 
+import asyncpg
+
 from unforget.store import MemoryStore
 
 logger = logging.getLogger("unforget.tools")
@@ -192,10 +194,12 @@ class MemoryToolExecutor:
         agent_id: str,
         *,
         tools: list[str] | None = None,
+        source_thread_id: str | None = None,
     ):
         self.store = store
         self.org_id = org_id
         self.agent_id = agent_id
+        self.source_thread_id = source_thread_id
         # Allow selecting a subset of tools
         self._enabled = set(tools) if tools else {t["name"] for t in MEMORY_TOOLS}
 
@@ -266,15 +270,19 @@ class MemoryToolExecutor:
             return f"Error: {e}"
 
     async def _exec_store(self, args: dict) -> str:
-        item = await self.store.write(
-            args["content"],
-            org_id=self.org_id,
-            agent_id=self.agent_id,
-            memory_type=args.get("memory_type", "insight"),
-            tags=args.get("tags", []),
-            importance=args.get("importance", 0.5),
-        )
-        return f"Stored: \"{item.content}\" (id: {item.id})"
+        try:
+            item = await self.store.write(
+                args["content"],
+                org_id=self.org_id,
+                agent_id=self.agent_id,
+                memory_type=args.get("memory_type", "insight"),
+                tags=args.get("tags", []),
+                importance=args.get("importance", 0.5),
+                source_thread_id=self.source_thread_id,
+            )
+            return f"Stored: \"{item.content}\" (id: {item.id})"
+        except asyncpg.UniqueViolationError:
+            return f"Already stored: \"{args['content'][:80]}\" (skipped duplicate)"
 
     async def _exec_search(self, args: dict) -> str:
         results = await self.store.recall(
