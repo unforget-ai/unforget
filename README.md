@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://docs.unforget.sh">Documentation</a> · <a href="#quick-start">Quick Start</a> · <a href="#llm-integrations">Integrations</a> · <a href="#how-retrieval-works">How It Works</a>
+  <a href="https://docs.unforget.sh">Documentation</a> · <a href="#quick-start">Quick Start</a> · <a href="#llm-integrations">Integrations</a> · <a href="#mcp-server">MCP</a> · <a href="#how-retrieval-works">How It Works</a>
 </p>
 
 ---
@@ -158,6 +158,33 @@ result = await executor.execute("memory_store", {
     "importance": 0.7,
 })
 ```
+
+---
+
+## MCP Server
+
+Use Unforget with Claude Code, Cursor, or any MCP client:
+
+```bash
+pipx install unforget-mcp --python python3.12
+```
+
+Add to `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "unforget": {
+      "command": "unforget-mcp",
+      "args": []
+    }
+  }
+}
+```
+
+5 tools: `memory_store`, `memory_search`, `memory_forget`, `memory_list`, `memory_update`. Zero config — embedded PostgreSQL starts automatically.
+
+See [unforget-mcp](https://github.com/unforget-ai/unforget-mcp) for details.
 
 ---
 
