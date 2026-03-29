@@ -1,4 +1,4 @@
-"""4-channel retrieval with RRF fusion and type boosting.
+"""4-channel retrieval with RRF fusion, type boosting, and association pull.
 
 Channels:
   1. Semantic — pgvector cosine similarity
@@ -9,6 +9,7 @@ Channels:
 All 4 channels execute in a single SQL round trip via CTEs.
 Fusion: Reciprocal Rank Fusion (RRF) with configurable k and channel weights.
 Boosting: insight ×1.5, event ×1.0, raw ×0.5 (configurable).
+Association pull: top results boost their linked memories from the candidate pool.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from typing import Any
 
 import asyncpg
 
+from unforget.associations import get_associations
 from unforget.types import MemoryResult, MemoryType
 
 logger = logging.getLogger("unforget.retrieval")
@@ -44,6 +46,11 @@ class RetrievalConfig:
     })
     per_channel_limit: int = 15
     ef_search: int = 40
+
+    # Association pull: boost linked memories after RRF fusion
+    association_pull: bool = True
+    association_pull_weight: float = 0.3  # fraction of anchor's score to add
+    association_pull_top_k: int = 5       # how many top results trigger pull
 
 
 async def four_channel_recall(
@@ -209,10 +216,35 @@ async def four_channel_recall(
     # Sort by fused score
     scored.sort(key=lambda x: x[1], reverse=True)
 
+    # --- Association Pull ---
+    # Top-K anchors pull their linked memories up from the candidate pool.
+    if config.association_pull and scored:
+        score_map = dict(scored)
+        anchor_ids = [rid for rid, _ in scored[:config.association_pull_top_k]]
+
+        # Look up associations (single query, ~1-2ms)
+        assoc_map = await get_associations(conn, anchor_ids)
+
+        if assoc_map:
+            pull_w = config.association_pull_weight
+            for anchor_id in anchor_ids:
+                anchor_score = score_map[anchor_id]
+                for link in assoc_map.get(anchor_id, []):
+                    linked_id = link.memory_id
+                    if linked_id in score_map:
+                        # Boost existing candidate
+                        boost = anchor_score * link.strength * pull_w
+                        score_map[linked_id] += boost
+
+            # Re-sort with boosted scores
+            scored = sorted(score_map.items(), key=lambda x: x[1], reverse=True)
+
     # Build results
     results = []
     for rid, score in scored[:limit]:
-        row = id_to_row[rid]
+        row = id_to_row.get(rid)
+        if row is None:
+            continue  # linked memory not in candidate pool
         results.append(MemoryResult(
             id=row["id"],
             content=row["content"],

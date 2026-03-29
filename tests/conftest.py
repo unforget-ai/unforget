@@ -29,6 +29,7 @@ async def store():
     await s.initialize()
     yield s
     # Cleanup: delete all test data
+    await s.pool.execute("DELETE FROM memory_associations")
     await s.pool.execute("DELETE FROM memory_history")
     await s.pool.execute("DELETE FROM memory")
     await s.close()

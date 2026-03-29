@@ -35,6 +35,7 @@ class CycleReport:
     total_memories_decayed: int = 0
     total_memories_expired: int = 0
     total_memories_promoted: int = 0
+    total_associations_linked: int = 0
     errors: list[str] = field(default_factory=list)
     duration_seconds: float = 0.0
 
@@ -189,6 +190,7 @@ class ConsolidationScheduler:
                 report.total_memories_decayed += agent_report.memories_decayed
                 report.total_memories_expired += agent_report.memories_expired
                 report.total_memories_promoted += agent_report.memories_promoted
+                report.total_associations_linked += agent_report.associations_linked
                 if agent_report.errors:
                     report.errors.extend(
                         f"{org_id}/{agent_id}: {e}" for e in agent_report.errors
