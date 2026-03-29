@@ -28,7 +28,12 @@ benchmarks/locomo/results/
 
 # Demo (not published)
 demo/
+demo2/
 benchmarks/
 autoimprove/
 
 ROADMAP.md
+
+# Benchmark logs
+*.log
+nohup.out

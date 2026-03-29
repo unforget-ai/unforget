@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 import asyncpg
 import numpy as np
 
+from unforget.associations import build_associations
 from unforget.embedder import BaseEmbedder
 from unforget.entities import extract_entities
 
@@ -33,6 +34,7 @@ class ConsolidationReport:
     memories_decayed: int = 0
     memories_expired: int = 0
     memories_promoted: int = 0
+    associations_linked: int = 0
     errors: list[str] = field(default_factory=list)
 
 
@@ -92,7 +94,16 @@ async def consolidate(
         coros.append(_promote_with_llm(pool, embedder, org_id, agent_id, llm, report))
     await asyncio.gather(*coros)
 
-    # Step 5: Mark consolidated_at
+    # Step 5: Build co-occurrence association links
+    try:
+        report.associations_linked = await build_associations(
+            pool, org_id=org_id, agent_id=agent_id,
+        )
+    except Exception as e:
+        report.errors.append(f"Association linking failed: {e}")
+        logger.warning("Association linking failed for %s/%s: %s", org_id, agent_id, e)
+
+    # Step 6: Mark consolidated_at
     await pool.execute(
         """
         UPDATE memory SET consolidated_at = now()
@@ -103,10 +114,11 @@ async def consolidate(
     )
 
     logger.info(
-        "Consolidation complete for %s/%s: %d merged, %d decayed, %d expired, %d promoted",
+        "Consolidation complete for %s/%s: %d merged, %d decayed, %d expired, %d promoted, %d linked",
         org_id, agent_id,
         report.duplicates_merged, report.memories_decayed,
         report.memories_expired, report.memories_promoted,
+        report.associations_linked,
     )
     return report
 
@@ -220,10 +232,15 @@ async def _deduplicate(
     async with pool.acquire() as conn:
         async with conn.transaction():
             for content, vec_str, entities, nid in update_newer:
-                await conn.execute(
-                    "UPDATE memory SET content = $1, embedding = $2::vector, entities = $3 WHERE id = $4",
-                    content, vec_str, entities, nid,
-                )
+                # Use savepoint so a unique violation doesn't abort the whole transaction
+                try:
+                    async with conn.transaction():
+                        await conn.execute(
+                            "UPDATE memory SET content = $1, embedding = $2::vector, entities = $3 WHERE id = $4",
+                            content, vec_str, entities, nid,
+                        )
+                except asyncpg.UniqueViolationError:
+                    logger.debug("Dedup merge skipped (content collision): %s", content[:60])
             await conn.executemany(
                 "UPDATE memory SET valid_to = now(), superseded_by = $2 WHERE id = $1",
                 list(zip(supersede_ids, supersede_by)),
@@ -345,20 +362,39 @@ async def _promote_with_llm(
     raw_texts = "\n".join(f"- {r['content']}" for r in rows)
     prompt = (
         "Extract the key facts and insights from these conversation fragments. "
-        "Return one insight per line. Be concise. Only include non-obvious information.\n\n"
+        "Return one insight per line, starting each line with '- '. "
+        "Be concise. Only include non-obvious, factual information worth remembering "
+        "(e.g. user preferences, decisions, personal details). "
+        "If there is nothing meaningful to extract, respond with exactly: NONE\n\n"
         f"{raw_texts}"
     )
 
     try:
         response = await llm(prompt)
-        insights = [line.strip().lstrip("- ") for line in response.strip().split("\n") if line.strip()]
     except Exception as e:
         report.errors.append(f"Promotion LLM call failed: {e}")
         return
 
+    # Check if LLM found nothing worth promoting
+    stripped = response.strip()
+    if stripped.upper() in ("NONE", "NONE.", "N/A", "- NONE"):
+        logger.info("Promotion: LLM found no insights to extract from %d raw memories", len(rows))
+        return
+
+    insights = [line.strip().lstrip("- ") for line in stripped.split("\n") if line.strip()]
+
     # Store each extracted insight
     for insight_text in insights:
+        # Skip short lines, meta-commentary, and refusal-like responses
         if len(insight_text) < 10:
+            continue
+        lower = insight_text.lower()
+        if any(phrase in lower for phrase in [
+            "cannot extract", "no meaningful", "insufficient",
+            "nothing to extract", "no key facts", "no insights",
+            "not enough", "too brief", "no substantive",
+            "based on the conversation", "there is no",
+        ]):
             continue
         embedding = embedder.embed(insight_text)
         vec_str = "[" + ",".join(f"{v:.6f}" for v in embedding) + "]"
