@@ -166,7 +166,7 @@ result = await executor.execute("memory_store", {
 Use Unforget with Claude Code, Cursor, or any MCP client:
 
 ```bash
-pipx install unforget-mcp --python python3.12
+pipx install unforget-mcp
 ```
 
 Add to `.mcp.json`:

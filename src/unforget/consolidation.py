@@ -10,6 +10,7 @@ Inspired by Letta's sleep-time compute pattern.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
@@ -340,15 +341,14 @@ async def _promote_with_llm(
     Groups raw memories by topic similarity, then asks LLM to distill
     each group into a concise insight or event.
     """
-    # Get unconsolidated raw memories
+    # Get all active raw memories for promotion
     rows = await pool.fetch(
         """
-        SELECT id, content, created_at
+        SELECT id, content, created_at, source_thread_id
         FROM memory
         WHERE org_id = $1 AND agent_id = $2
           AND memory_type = 'raw'
           AND valid_to IS NULL
-          AND consolidated_at IS NULL
         ORDER BY created_at ASC
         LIMIT 50
         """,
@@ -358,15 +358,27 @@ async def _promote_with_llm(
     if len(rows) < 2:
         return
 
-    # Batch distill — send all raw chunks to LLM for insight extraction
+    # Collect source info for provenance
+    raw_ids = [r["id"] for r in rows]
+    # Inherit the most common thread_id from source raws
+    thread_ids = [r.get("source_thread_id") for r in rows if r.get("source_thread_id")]
+    source_thread = max(set(thread_ids), key=thread_ids.count) if thread_ids else None
+
+    # Batch distill — send all raw chunks to LLM for structured extraction
     raw_texts = "\n".join(f"- {r['content']}" for r in rows)
     prompt = (
-        "Extract the key facts and insights from these conversation fragments. "
-        "Return one insight per line, starting each line with '- '. "
-        "Be concise. Only include non-obvious, factual information worth remembering "
-        "(e.g. user preferences, decisions, personal details). "
-        "If there is nothing meaningful to extract, respond with exactly: NONE\n\n"
-        f"{raw_texts}"
+        "Extract key facts and insights from these conversation fragments.\n"
+        "For each insight, assess its importance (0.0-1.0) and assign relevant tags.\n\n"
+        "Importance guide:\n"
+        "  0.8-1.0: Critical personal info (allergies, health, identity, family)\n"
+        "  0.5-0.7: Preferences, decisions, goals, relationships\n"
+        "  0.2-0.4: Casual interests, opinions, minor details\n"
+        "  0.0-0.1: Trivial, greetings, small talk (skip these)\n\n"
+        "Return valid JSON array. Example:\n"
+        '[{"insight": "User is allergic to peanuts", "importance": 0.95, "tags": ["health", "allergy"]},\n'
+        ' {"insight": "User prefers dark mode", "importance": 0.45, "tags": ["preference", "ui"]}]\n\n'
+        "If nothing meaningful to extract, return: []\n\n"
+        f"Fragments:\n{raw_texts}"
     )
 
     try:
@@ -375,19 +387,48 @@ async def _promote_with_llm(
         report.errors.append(f"Promotion LLM call failed: {e}")
         return
 
-    # Check if LLM found nothing worth promoting
+    # Parse JSON response
     stripped = response.strip()
-    if stripped.upper() in ("NONE", "NONE.", "N/A", "- NONE"):
-        logger.info("Promotion: LLM found no insights to extract from %d raw memories", len(rows))
+    # Handle markdown code blocks
+    if stripped.startswith("```"):
+        stripped = stripped.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+
+    if stripped in ("[]", "NONE", "NONE.", "N/A"):
+        logger.info("Promotion: LLM found no insights from %d raw memories", len(rows))
         return
 
-    insights = [line.strip().lstrip("- ") for line in stripped.split("\n") if line.strip()]
+    try:
+        extracted = json.loads(stripped)
+        if not isinstance(extracted, list):
+            extracted = [extracted]
+    except json.JSONDecodeError:
+        # Fallback: try line-by-line parsing (old format)
+        logger.warning("Promotion: JSON parse failed, falling back to line parsing")
+        extracted = []
+        for line in stripped.split("\n"):
+            line = line.strip().lstrip("- ")
+            if len(line) >= 10:
+                extracted.append({"insight": line, "importance": 0.5, "tags": []})
 
-    # Store each extracted insight
-    for insight_text in insights:
-        # Skip short lines, meta-commentary, and refusal-like responses
+    # Store each extracted insight with provenance
+    for item in extracted:
+        if not isinstance(item, dict):
+            continue
+        insight_text = item.get("insight", "").strip()
+        importance = item.get("importance", 0.5)
+        tags = item.get("tags", [])
+
         if len(insight_text) < 10:
             continue
+
+        # Clamp importance to valid range
+        importance = max(0.05, min(1.0, float(importance)))
+
+        # Skip very low importance (trivial)
+        if importance < 0.15:
+            continue
+
+        # Skip refusal-like responses
         lower = insight_text.lower()
         if any(phrase in lower for phrase in [
             "cannot extract", "no meaningful", "insufficient",
@@ -396,21 +437,44 @@ async def _promote_with_llm(
             "based on the conversation", "there is no",
         ]):
             continue
+
+        # Ensure tags are strings
+        tags = [str(t).lower().strip() for t in tags if t][:5]
+
         embedding = embedder.embed(insight_text)
         vec_str = "[" + ",".join(f"{v:.6f}" for v in embedding) + "]"
 
         try:
-            await pool.execute(
+            result = await pool.fetchrow(
                 """
                 INSERT INTO memory (
                     org_id, agent_id, content, memory_type, tags, embedding,
-                    entities, importance
-                ) VALUES ($1, $2, $3, 'insight', ARRAY[]::TEXT[], $4, $5, 0.6)
+                    entities, importance, source_thread_id
+                ) VALUES ($1, $2, $3, 'insight', $4, $5, $6, $7, $8)
                 ON CONFLICT (org_id, agent_id, content) DO NOTHING
+                RETURNING id
                 """,
-                org_id, agent_id, insight_text, vec_str,
-                extract_entities(insight_text),
+                org_id, agent_id, insight_text, tags, vec_str,
+                extract_entities(insight_text), importance, source_thread,
             )
-            report.memories_promoted += 1
+
+            if result:
+                insight_id = result["id"]
+                report.memories_promoted += 1
+
+                source_summary = "; ".join(
+                    r["content"][:60] for r in rows[:5]
+                )
+                await pool.execute(
+                    """
+                    INSERT INTO memory_history
+                        (memory_id, action, old_content, new_content, changed_by)
+                    VALUES ($1, 'promoted', $2, $3, 'consolidation')
+                    """,
+                    insight_id,
+                    f"From {len(raw_ids)} raw memories: {source_summary}",
+                    insight_text,
+                )
+
         except Exception as e:
             report.errors.append(f"Promotion insert failed: {e}")
