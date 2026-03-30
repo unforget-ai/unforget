@@ -217,7 +217,7 @@ Tested on [LoCoMo](https://github.com/snap-research/locomo) — 1,540 questions 
 | Open-domain | 85.0% |
 | **Overall** | **80.6%** |
 
-Config: `--ingest-mode hybrid --recall-limit 15`, answer/judge model: `claude-haiku-4-5`. Zero-LLM write path — retrieval only, no RAG chain.
+Config: `--ingest-mode hybrid --recall-limit 15`, answer/judge model: `gpt-4.1-mini`. Zero-LLM write path — retrieval only, no RAG chain.
 
 ---
 
