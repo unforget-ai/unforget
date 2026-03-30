@@ -205,6 +205,22 @@ Results are boosted by type (insight > event > raw) and reranked with a cross-en
 
 ---
 
+## Benchmark: LoCoMo (ACL 2024)
+
+Tested on [LoCoMo](https://github.com/snap-research/locomo) — 1,540 questions across 10 long conversations measuring memory accuracy across single-hop, multi-hop, temporal, and open-domain categories.
+
+| Category | Accuracy |
+|----------|----------|
+| Single-hop | 73.0% |
+| Temporal | 81.0% |
+| Multi-hop | 66.7% |
+| Open-domain | 85.0% |
+| **Overall** | **80.6%** |
+
+Config: `--ingest-mode hybrid --recall-limit 15`, answer/judge model: `claude-haiku-4-5`. Zero-LLM write path — retrieval only, no RAG chain.
+
+---
+
 ## More Examples
 
 <details>
